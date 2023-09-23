@@ -1,0 +1,142 @@
+//Programa oficial do projeto do Climatizador Geotermico
+//Desenvolvido por Agatha e Camila - Ano 2023.
+#include <ESP8266HTTPClient.h> //Biblioteca para comunicação wi-fi do modulo ESP8266
+#include <ESP8266WiFi.h> //Biblioteca para comunicação wi-fi do modulo ESP8266
+#include <DHT.h> //Biblioteca para funcionamento do sensor de temperatura e umidade DHT11
+#include <OneWire.h>  //Biblioteca para o sensor DS18B20
+#include <DallasTemperature.h> //Biblioteca para o sensor DS18B20
+#include <TaskScheduler.h> //Biblioteca para tarefa agendada
+
+char ssid[] = "moto g(20) Ca"; //rede Wi-Fi
+char password[] = "descubra"; //senha da rede wi-Fi
+
+//--------------------Configuração dos sensores--------------------
+#define oneWireBus 0 //Configuração do DS18B20, conectado ao D1
+OneWire oneWire(oneWireBus);//Configuração do DS18B20
+DallasTemperature sensors(&oneWire);//Configuração do DS18B20
+
+#define DHTPIN 4 //Pino digital D2 (GPIO4) conectado ao DHT11
+#define DHTTYPE DHT11 //Tipo do sensor DHT11
+
+DHT dht(DHTPIN, DHTTYPE); //Inicializando o objeto dht do tipo DHT passando como parâmetro o pino (DHTPIN) e o tipo do sensor (DHTTYPE)
+
+float temperaturaDHT; //variável para armazenar a temperatura DHT11
+float umidadeDHT; //Variável para armazenar a umidade DHT11
+float temperaturaDS18B20 = sensors.getTempCByIndex(0);; //variável para armazenar a temperatura DS18B20
+
+//---------------Saídas atuadores-----------------------------------------------------
+#define Bomba 14 //Pino D5
+#define Vent 12 //Pino D6
+
+//---------------------Declaração das funções------------------------------------------
+void envioSensores(); //Faz o envio dos dados da leitura dos sensores para o banco de dados
+void leituraDosSensores(void);//Faz a leitura dos sensores
+void LIGA(void); //Liga o módulo relé
+void DESLIGA(void); //Desliga o módulo relé
+char estadoo; //Variavel que armazena o estado do sistema
+
+Scheduler runner; //Configuração de um programa agendado
+Task leituraenviosensores(1800000, TASK_FOREVER, &envioSensores); /*Declaração do programa agendado, para 
+ o tempo de a cada 30 minutos, quando envia os dados dos sensores ao banco de dados*/
+
+void setup() {
+  Serial.begin(9600); // Comunicação serial
+  dht.begin(); //Inicializa o sensor DHT11
+  sensors.begin(); //Para o sensor DS18B20
+  Serial.println("Iniciando");
+  pinMode(Bomba, OUTPUT); // Pino de saída para o relé
+  pinMode(Vent, OUTPUT); // Pino de saída para o relé
+  digitalWrite(Bomba, HIGH); // Enviar sinal ao relé
+  digitalWrite(Vent, HIGH); // Enviar sinal ao relé
+  
+  runner.addTask(leituraenviosensores); //Inicia a tarefa agendada
+  leituraenviosensores.enable(); //Habilita a tarefa 
+  while (!Serial) {} // testa cconexão Wi-Fi
+  WiFi.mode(WIFI_STA); //Configuração de modo "Estação" 
+  WiFi.begin(ssid, password); //passagem do nome da rede e senha Wi-Fi para a conexão
+  while (WiFi.status() != WL_CONNECTED) { //Enquanto tenta conectar
+    delay(100);
+  }
+  Serial.println("Wi-Fi conectado");
+  // WiFi.disconnect();
+  //Serial.println("Disconnected!");
+} //fim de setup
+
+void loop() {
+
+  String result = fetchMessage("https://geoclim.brazilsouth.cloudapp.azure.com/src/ard-cnnx.php?ip=0.0.0.0&sta=SH");//Busca o estado do sistema
+  Serial.println(result); //Exibe na serial o estado do sistema
+  
+  if (result == "ON") { //Comparação do estado do sistema para ligar
+    LIGA();
+  }
+  else if (result == "OFF") { //Comparação do estado do sistema para desligar
+    DESLIGA();
+  }
+  runner.execute(); //Execução do Scheduler
+  delay(2000);
+}
+
+void envioSensores() {
+
+  HTTPClient http; //Abre conexão web
+  WiFiClientSecure client;
+  client.setInsecure();
+  sensors.requestTemperatures(); // //Realiza a leitura da temperatura
+  temperaturaDHT = dht.readTemperature();  //Realiza a leitura da temperatura
+  umidadeDHT = dht.readHumidity(); //Realiza a leitura da umidade
+  /*Próxima linha envia os dados dos sensores para a aplicação web*/
+  String hostt = "https://geoclim.brazilsouth.cloudapp.azure.com/src/ard-cnnx.php?ip=0.0.0.0&tem=" + String(temperaturaDHT) + "|" + String(temperaturaDS18B20) + "&umi=" + String(umidadeDHT);
+  http.begin(client, hostt);
+  int httpCode = http.GET();
+  Serial.println("");
+  Serial.print("Temperatura interna: ");
+  Serial.print(temperaturaDHT); //Imprime no monitor serial o valor da temperatura lida
+  Serial.println(" ºC");
+  Serial.print("Umidade: ");
+  Serial.print(umidadeDHT); //Imprime no monitor serial o valor da umidade lida
+  Serial.println(" %");
+  Serial.print("Temperatura externa: ");
+  Serial.print(temperaturaDS18B20); //Imprime no monitor serial o valor da temperatura lida
+  Serial.println(" ºC");
+  Serial.println("");
+
+}
+
+String fetchMessage(char host[]) { //FUNÇÃO PARA PEGAR O RETORNO DO ESTADO DO SISTEMA
+  HTTPClient http; //Abre conexão web
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  http.begin(client, host);
+  int httpCode = http.GET();
+
+  String payload = "";
+
+  if (httpCode > 0) {
+    Serial.printf("HTTP GET. Se estabeleceu conexão com a uri, status da http: %d\n", httpCode); //retornou 200
+    //Serial.println(HTTP_CODE_OK); //retornou 200
+    if (httpCode == HTTP_CODE_OK) {
+      Serial.print("Retorno do estado do sistema: ");
+      payload = http.getString(); //Retorna ON ou OFF
+    }
+  } else {
+    Serial.printf("HTTP GET falhou, erro: %s\n", http.errorToString(httpCode).c_str());
+  }
+  Serial.println("");
+
+  http.end(); //Fecha conexão web
+  return payload; //retorna resultado do estado do sistema
+}
+
+void LIGA(void) //FUNÇÃO LIGA
+{
+  digitalWrite(Vent, LOW); // Enviar sinal ao relé
+  digitalWrite(Bomba, LOW); // Enviar sinal ao relé
+  return;
+}
+void DESLIGA(void) { //FUNÇÃO DESLIGA
+  digitalWrite(Bomba, HIGH); // Enviar sinal ao relé
+  digitalWrite(Vent, HIGH); // Enviar sinal ao relé
+  return;
+}
